@@ -1,0 +1,247 @@
+---
+title: "2020-project"
+author: "yuyan fan"
+date: "2025-04-28"
+output: html_document
+---
+
+
+```{r setup, message=FALSE}
+library(MASS)
+library(TriMatch)    # for `data(nmes)`
+library(bcf)
+library(glmnet)
+library(dplyr)
+library(caret)
+library(lme4)        # for lmer()
+library(ggplot2)     # for plotting
+set.seed(111)
+```
+
+```{r}
+save_file <- "~/Desktop/data2020_final_project/"
+filename <- "multi_Simulation_Section61"
+dir.create(save_file, showWarnings = FALSE)
+```
+
+```{r}
+data(nmes)  # loads nmes
+
+# 1. define treatment, outcome, covariates
+nmes$flag <- ifelse(nmes$packyears > 17, 1, 0)
+covs       <- c(
+  "LASTAGE","MALE","RACE3","educate","marital",
+  "beltuse","INCALPER","POVSTALB","SREGION",
+  "eversmk","current","former","AGESMOKE",
+  "CIGSADAY","AGESTOP","yearsince","packyears"
+)
+x_raw   <- nmes[, covs]
+y_all   <- nmes$TOTALEXP
+
+# 2. median‐impute covariates
+pp      <- preProcess(x_raw, method = "medianImpute")
+x_imp   <- predict(pp, newdata = x_raw)
+
+# 3. keep only complete cases
+cc_idx     <- complete.cases(y_all, nmes$flag, x_imp)
+y          <- y_all[cc_idx]
+z          <- nmes$flag[cc_idx]
+x_clean    <- x_imp[cc_idx, ]
+group_all  <- as.factor(x_clean$SREGION)
+```
+
+```{r, warning=FALSE}
+# settings
+consolidated_results <- tibble()
+sample_sizes <- c(250, 500)
+tau_str      <- c("heterogeneous","homogeneous")
+mu_str       <- c("linear","nonlinear")  # unused here, but kept for bookkeeping
+num_rep      <- 50
+
+# true effect settings
+beta0    <- 1000
+beta_vec <- setNames(rep(0, length(covs)), covs)
+tau_true <- 500
+
+for (n in sample_sizes) {
+  for (taus in tau_str) {
+    for (mus in mu_str) {
+      for (rep in seq_len(num_rep)) {
+        # subsample
+        idx <- sample(nrow(x_clean), n)
+        df  <- data.frame(
+          z        = z[idx],
+          x_clean[idx, covs],
+          group_id = group_all[idx]
+        )
+
+        # simulate outcome with a fully numeric design matrix
+        X_mat     <- data.matrix(df[, covs])
+        if (taus == "homogeneous") {
+          tau_i <- rep(tau_true, n)
+        } else {
+          tau_i <- tau_true + 0.2 * df$LASTAGE
+        }
+        eps       <- rnorm(n, 0, 300)
+        df$y_sim <- as.numeric(beta0 +
+                       X_mat %*% beta_vec +
+                       tau_i * df$z +
+                       eps)
+
+        # fit random‐intercept
+        fit <- lmer(
+          y_sim ~ z + LASTAGE + MALE + RACE3 + educate + marital +
+            (1 | group_id),
+          data = df,
+          control = lmerControl(
+            optimizer = "bobyqa",
+            optCtrl   = list(maxfun = 1e5)
+          )
+        )
+
+        # compute ATE‐RMSE
+        tau_hat  <- fixef(fit)["z"]
+        rmse_ate <- sqrt((tau_hat - tau_true)^2)
+
+        # compute CATE‐RMSE
+        tau_hat_i  <- rep(tau_hat, n)
+        rmse_cate  <- sqrt(mean((tau_hat_i - tau_i)^2))
+
+        # store
+        consolidated_results <- bind_rows(
+          consolidated_results,
+          tibble(
+            Method      = "Multilevel",
+            RMSE_CATE   = rmse_cate,
+            RMSE_ATE    = rmse_ate,
+            rep         = rep,
+            n           = n,
+            p           = length(covs),
+            tau_setting = taus,
+            mu_setting  = mus
+          )
+        )
+      }
+    }
+  }
+}
+
+# save
+save(
+  consolidated_results,
+  file = file.path(save_file, paste0(filename, ".RData"))
+)
+```
+
+```{r}
+# optional: random‐intercept + slope on last sampled df
+model_2 <- lmer(
+  y_sim ~ z + LASTAGE + MALE + RACE3 + educate + marital +
+    (1 + z | group_id),
+  data = df,
+  control = lmerControl(
+    optimizer = "bobyqa",
+    optCtrl   = list(maxfun = 1e5)
+  )
+)
+summary(model_2)
+
+```
+
+```{r}
+# reload and inspect
+load(file.path(save_file, paste0(filename, ".RData")))
+head(consolidated_results)
+
+# histogram of ATE‐RMSE
+ggplot(consolidated_results, aes(x = RMSE_ATE)) +
+  geom_histogram(bins = 30, color = "black", fill = "lightblue") +
+  labs(
+    title = "Histogram of ATE RMSE",
+    x     = "RMSE (ATE)",
+    y     = "Frequency"
+  )
+
+```
+```{r}
+# reload and inspect
+load(file.path(save_file, paste0(filename, ".RData")))
+head(consolidated_results)
+
+# histogram of ATE‐RMSE
+ggplot(consolidated_results, aes(x = RMSE_CATE)) +
+  geom_histogram(bins = 30, color = "black", fill = "lightgreen") +
+  labs(
+    title = "Histogram of ATE RMSE",
+    x     = "RMSE (CATE)",
+    y     = "Frequency"
+  )
+```
+
+
+```{r}
+# reload and inspect
+load(file.path(save_file, paste0(filename, ".RData")))
+head(consolidated_results)
+
+# histograms
+ggplot(consolidated_results, aes(x = RMSE_ATE)) +
+  geom_histogram(bins = 30, color = "black", fill = "lightblue") +
+  labs(title="ATE RMSE Distribution", x="RMSE_ATE", y="Count")
+
+ggplot(consolidated_results, aes(x = RMSE_CATE)) +
+  geom_histogram(bins = 30, color = "black", fill = "salmon") +
+  labs(title="CATE RMSE Distribution", x="RMSE_CATE", y="Count")
+
+
+```
+
+
+```{r,fig.width=4, fig.height=6}
+load(file.path(save_file, paste0(filename, ".RData")))
+
+# Boxplot of ATE‐RMSE
+boxplot(
+  consolidated_results$RMSE_ATE,
+  main  = "Boxplot of ATE RMSE",
+  ylab  = "RMSE (ATE)",
+  col   = "lightgreen",
+  border= "darkgreen"
+)
+
+# Boxplot of CATE‐RMSE
+boxplot(
+  consolidated_results$RMSE_CATE,
+  main  = "Boxplot of CATE RMSE",
+  ylab  = "RMSE (CATE)",
+  col   = "lightgreen",
+  border= "darkgreen"
+)
+```
+
+```{r}
+# Histogram of ATE RMSE
+hist(
+  consolidated_results$RMSE_ATE,
+  breaks = 30,
+  col    = "lightblue",
+  main   = "Histogram of ATE RMSE",
+  xlab   = "RMSE_ATE",
+  border = "black"
+)
+
+# Histogram of CATE RMSE
+hist(
+  consolidated_results$RMSE_CATE,
+  breaks = 30,
+  col    = "salmon",
+  main   = "Histogram of CATE RMSE",
+  xlab   = "RMSE_CATE",
+  border = "black"
+)
+
+```
+
+
+
+

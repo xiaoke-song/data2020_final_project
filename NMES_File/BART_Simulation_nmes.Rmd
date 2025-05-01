@@ -1,0 +1,178 @@
+---
+title: "BART_NMES"
+output:
+  html_document:
+    df_print: paged
+latex_engine: xelatex
+header-includes:
+- \usepackage{blkarray}
+- \usepackage{amsmath}
+---
+
+```{r}
+# Install required packages (if not yet installed)
+```
+
+```{r}
+# Load libraries
+library(BART)
+library(MASS)
+library(TriMatch)
+library(dplyr)
+
+# Save results here (Downloads/DATA2020/data2020_final_project)
+save_file <- "/Users/jingxu/Downloads/DATA2020/data2020_final_project"
+filename <- "BART_Simulation_NMES"
+dir.create(save_file, showWarnings = FALSE)
+```
+
+```{r}
+# -----------------------------
+# 1. Load data and define variables
+# -----------------------------
+data(nmes)
+head(nmes)
+str(nmes)
+```
+
+```{r}
+# Filter data: positive expenditures and age >= 28 (like the original paper)
+nmes_filtered <- nmes %>%
+  filter(TOTALEXP > 0, LASTAGE >= 28)
+
+# Outcome: log-transformed medical expenditures
+y <- log(nmes_filtered$TOTALEXP)
+
+# Treatment: binary indicator (e.g., flag for heavy smoker)
+z <- nmes_filtered$flag
+
+# -----------------------------
+# 3. Covariate Preparation
+# -----------------------------
+# Drop outcome and treatment from covariates
+x <- nmes_filtered %>%
+  select(-flag, -TOTALEXP)
+
+# Convert character columns to factor, then numeric
+x <- x %>%
+  mutate(across(where(is.character), as.factor)) %>%
+  mutate(across(where(is.factor), ~ as.numeric(as.factor(.))))
+
+# Impute missing values: numeric columns only
+x <- x %>%
+  mutate(across(where(is.numeric), ~ ifelse(is.na(.), median(., na.rm = TRUE), .)))
+
+# -----------------------------
+# 4. Prepare Counterfactual Data
+# -----------------------------
+X1 <- data.frame(z = 1, x)  # everyone treated
+X0 <- data.frame(z = 0, x)  # everyone control
+X_full <- data.frame(z = z, x)  # observed
+
+# -----------------------------
+# 5. Define RMSE Function
+# -----------------------------
+rmse_func <- function(true, estimate) {
+  sqrt(mean((true - estimate)^2))
+}
+```
+
+```{r}
+# -----------------------------
+# 4. Loop Over Seeds
+# -----------------------------
+results <- data.frame()
+
+for (seed in 1:50) {
+  set.seed(seed)
+  
+  fit.bart <- wbart(
+    x.train = as.matrix(X_full),
+    y.train = y,
+    nskip = 500,
+    ndpost = 500
+  )
+  
+  # Predict counterfactual outcomes
+  pred1 <- predict(fit.bart, newdata = as.matrix(X1))
+  pred0 <- predict(fit.bart, newdata = as.matrix(X0))
+  
+  # Estimate treatment effects
+  tau_hat_samples <- pred1 - pred0
+  tau_hat <- rowMeans(tau_hat_samples)
+  
+  ate_hat <- mean(tau_hat)
+  ate_ci <- quantile(tau_hat, probs = c(0.025, 0.975))
+  
+  # Use mean CATE across seeds as pseudo-"truth" to get RMSE for variability tracking
+  rmse_cate <- rmse_func(mean(tau_hat), tau_hat)
+  rmse_ate <- sd(tau_hat) / sqrt(length(tau_hat))  # SE of ATE as proxy for variability
+  
+  # Append to results
+  results <- rbind(results, data.frame(
+    seed = seed,
+    ate = ate_hat,
+    ate_ci_lower = ate_ci[1],
+    ate_ci_upper = ate_ci[2],
+    rmse_cate = rmse_cate,
+    rmse_ate = rmse_ate
+  ))
+}
+
+# -----------------------------
+# 5. Save Results
+# -----------------------------
+save(results, file = "bart_nmes_results.RData")
+
+# -----------------------------
+# 6. Print Summary
+# -----------------------------
+print(results)
+```
+
+```{r}
+# Histogram of RMSE_ATE
+hist(results$rmse_ate,
+     breaks = 10,
+     col = "skyblue",
+     main = "Histogram of ATE RMSE (BART)",
+     xlab = "RMSE of ATE",
+     border = "black")
+
+# Boxplot of RMSE_ATE
+boxplot(results$rmse_ate,
+        main = "Boxplot of ATE RMSE (BART)",
+        ylab = "RMSE of ATE",
+        col = "skyblue",
+        border = "black")
+
+```
+
+```{r}
+# Histogram of RMSE_CATE
+hist(results$rmse_cate,
+     breaks = 10,
+     col = "skyblue",
+     main = "Histogram of CATE RMSE (BART)",
+     xlab = "RMSE of CATE",
+     border = "black")
+
+# Boxplot of RMSE_CATE
+boxplot(results$rmse_cate,
+        main = "Boxplot of CATE RMSE (BART)",
+        ylab = "RMSE of CATE",
+        col = "skyblue",
+        border = "black")
+
+```
+
+```{r}
+#备用plot，别run这条
+hist(tau_hat, breaks = 40, col = "skyblue",
+     main = "Estimated CATEs from BART",
+     xlab = "Individual Treatment Effect (log scale)")
+```
+
+```{r}
+
+```

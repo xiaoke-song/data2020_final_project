@@ -1,0 +1,207 @@
+---
+title: "BCF_NMES"
+output:
+  html_document:
+    df_print: paged
+latex_engine: xelatex
+header-includes:
+- \usepackage{blkarray}
+- \usepackage{amsmath}
+---
+
+```{r}
+# Install required packages (if not yet installed)
+#install.packages("TriMatch")
+#install.packages("bcf")
+#install.packages("glmnet")
+#install.packages("caret")
+#install.packages("dplyr")
+```
+
+```{r}
+# Load libraries
+library(TriMatch)
+library(bcf)
+library(glmnet)
+library(caret)
+library(dplyr)
+
+# Save results here (Downloads/DATA2020/data2020_final_project)
+save_file <- "/Users/24151/Downloads/data2020_final_project"
+filename <- "BCF_Simulation_NMES"
+dir.create(save_file, showWarnings = FALSE)
+```
+
+```{r}
+# -----------------------------
+# 1. Load data and define variables
+# -----------------------------
+data(nmes)
+head(nmes)
+str(nmes)
+```
+
+```{r}
+# -----------------------------
+# 1. Load & Prepare data (use your preprocessing setup)
+# -----------------------------
+# Define treatment: heavy smoker = packyears > 17
+nmes$flag <- ifelse(nmes$packyears > 17, 1, 0)
+
+# Define outcome
+y_all <- nmes$TOTALEXP
+
+# Define covariates
+covariate_names <- c(
+  "LASTAGE", "MALE", "RACE3", "educate", "marital",
+  "beltuse", "INCALPER", "POVSTALB", "SREGION",
+  "eversmk", "current", "former", "AGESMOKE", "CIGSADAY", "AGESTOP",
+  "yearsince", "packyears"
+)
+
+x_raw <- nmes[, covariate_names]
+
+# Impute missing values
+library(caret)
+pre_proc <- preProcess(x_raw, method = "medianImpute")
+x_imputed <- predict(pre_proc, newdata = x_raw)
+
+# Keep complete cases
+complete_idx <- complete.cases(y_all, nmes$flag, x_imputed)
+y_all <- y_all[complete_idx]
+z_all <- nmes$flag[complete_idx]
+x_imputed_clean <- x_imputed[complete_idx, ]
+
+# Estimate propensity scores
+library(glmnet)
+X_mat <- model.matrix(~ . - 1, data = x_imputed_clean)
+
+cv_fit <- cv.glmnet(x = X_mat, y = z_all, family = "binomial", alpha = 0)
+pihat_all <- predict(cv_fit, newx = X_mat, s = "lambda.min", type = "response")[, 1]
+
+# Create numeric BCF inputs
+x_model <- X_mat
+x_control_all <- x_model
+x_moderate_all <- x_model
+
+# -----------------------------
+# 2. Define RMSE function
+# -----------------------------
+rmse <- function(true, est) sqrt(mean((true - est)^2))
+```
+
+```{r}
+# -----------------------------
+# Initialize storage for each iteration
+# -----------------------------
+ate_list <- numeric(10)
+ate_rmse_list <- numeric(10)
+cate_list <- list()
+cate_rmse_list <- numeric(10)
+
+
+# -----------------------------
+# 3. Loop over 10 random seeds
+# -----------------------------
+
+# Initialize results data frame
+results <- data.frame()
+
+# Loop for 50 replications (assuming all variables set up correctly)
+for (rep in 1:50) {
+  set.seed(rep)
+  sub_idx <- sample(seq_len(nrow(x_model)), size = 1000)
+  
+  y <- y_all[sub_idx]
+  z <- z_all[sub_idx]
+  x_control <- x_control_all[sub_idx, ]
+  x_moderate <- x_moderate_all[sub_idx, ]
+  pihat <- pihat_all[sub_idx]
+
+  fit <- bcf(
+    y = y,
+    z = z,
+    x_control = x_control,
+    x_moderate = x_moderate,
+    pihat = pihat,
+    nburn = 200,
+    nsim = 200
+  )
+  
+  tau_hat <- colMeans(fit$tau)
+  ate_hat <- mean(tau_hat)
+  ate_ci <- quantile(rowMeans(fit$tau), probs = c(0.025, 0.975))
+  
+  # Store CATE and compute RMSEs
+  cate_list[[rep]] <- tau_hat
+  ate_list[rep] <- ate_hat
+  
+  rmse_cate <- rmse(tau_hat, rowMeans(do.call(cbind, cate_list[1:rep])))
+  rmse_ate <- rmse(ate_hat, mean(ate_list[1:rep]))
+
+  # Append to results
+  results <- rbind(results, data.frame(
+    seed = rep,
+    ate = ate_hat,
+    ate_ci_lower = ate_ci[1],
+    ate_ci_upper = ate_ci[2],
+    rmse_cate = rmse_cate,
+    rmse_ate = rmse_ate
+  ))
+}
+
+
+```
+
+
+```{r}
+# -----------------------------
+# 5. Save Results
+# -----------------------------
+save(results, file = "bcf_nmes_results.RData")
+
+# -----------------------------
+# 6. Print Summary
+# -----------------------------
+print(results)
+```
+
+```{r}
+# Histogram of ATE RMSE
+hist(results$rmse_ate,
+     breaks = 10,
+     col = "skyblue",
+     main = "Histogram of ATE RMSE Across Seeds",
+     xlab = "ATE RMSE",
+     border = "black")
+
+# Boxplot of ATE RMSE
+boxplot(results$rmse_ate,
+        col = "skyblue",
+        border = "black",
+        main = "Boxplot of ATE RMSE",
+        ylab = "ATE RMSE")
+```
+
+
+```{r}
+# Histogram of CATE RMSE
+hist(results$rmse_cate,
+     breaks = 10,
+     col = "skyblue",
+     main = "Histogram of CATE RMSE Across Seeds",
+     xlab = "CATE RMSE",
+     border = "black")
+
+# Boxplot of CATE RMSE
+boxplot(results$rmse_cate,
+        col = "skyblue",
+        border = "black",
+        main = "Boxplot of CATE RMSE",
+        ylab = "CATE RMSE")
+
+```
+
+```{r}
+
+```
